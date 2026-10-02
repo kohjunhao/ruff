@@ -2,6 +2,7 @@ use compact_str::{CompactString, ToCompactString};
 use itertools::Itertools;
 use ruff_diagnostics::{Edit, Fix};
 use rustc_hash::{FxHashMap, FxHashSet};
+use salsa::plumbing::{AsId, FromId};
 
 use smallvec::SmallVec;
 use std::borrow::Cow;
@@ -2278,6 +2279,44 @@ impl<'db> Type<'db> {
 
     pub(crate) fn divergent(id: salsa::Id) -> Self {
         Self::Divergent(DivergentType::new(id))
+    }
+
+    /// Retains an unavailable type argument without identifying it with its enclosing value.
+    /// A later call can forward this dependency to another type variable while keeping the same
+    /// originating query. This bounds the identities we create when inference revisits a call.
+    fn pending_inference(
+        self,
+        db: &'db dyn Db,
+        typevar: BoundTypeVarInstance<'db>,
+        call_site: call::CallSite<'db>,
+    ) -> Option<Self> {
+        let Type::Divergent(divergent) = self else {
+            return None;
+        };
+        let root = match divergent.origin {
+            DivergentOrigin::Recursive(root) => root,
+            DivergentOrigin::PendingInference(id) => PendingInference::from_id(id).root(db),
+            DivergentOrigin::PendingNarrowing => return None,
+        };
+        Some(Self::Divergent(DivergentType {
+            origin: DivergentOrigin::PendingInference(
+                PendingInference::new(db, root, typevar, call_site).as_id(),
+            ),
+            flags: DivergentFlags::empty(),
+            materialization: None,
+        }))
+    }
+
+    /// Returns the identity of an unavailable type argument.
+    fn as_pending_inference(self) -> Option<PendingInference<'db>> {
+        let Type::Divergent(DivergentType {
+            origin: DivergentOrigin::PendingInference(id),
+            ..
+        }) = self
+        else {
+            return None;
+        };
+        Some(PendingInference::from_id(id))
     }
 
     /// Returns a divergent marker for a cycle in type alias inference.
@@ -11217,13 +11256,29 @@ enum DivergentOrigin {
     Recursive(salsa::Id),
     /// A predicate's narrowing is not yet known. This carries no recursive type identity.
     PendingNarrowing,
+    /// A type argument depends on an unresolved argument shape. The interned identity records
+    /// its query, call site, and type variable; it is not a back-reference to the query result.
+    PendingInference(salsa::Id),
+}
+
+/// Stable identity for an unavailable generic argument. Revisiting the same call's type variable
+/// can add arbitrarily many containers without providing a concrete binding. A separate call to
+/// the same function must still preserve those containers.
+#[salsa::interned(debug)]
+struct PendingInference<'db> {
+    #[returns(copy)]
+    root: salsa::Id,
+    #[returns(copy)]
+    typevar: BoundTypeVarInstance<'db>,
+    #[returns(copy)]
+    call_site: call::CallSite<'db>,
 }
 
 /// An internal marker used while resolving cyclic type inference.
 ///
 /// Recursive markers identify a query whose result is needed to infer its own inputs. Pending
-/// narrowing instead records that a predicate's constraints are not yet available; it does not
-/// reference a recursive type. Both must survive dynamic type reduction
+/// narrowing and type arguments instead record unavailable information; they do not reference
+/// the query's recursive type. All markers must survive dynamic type reduction
 /// (e.g. `Divergent` is assignable to `@Todo`, but `@Todo | Divergent` must not be reduced to `@Todo`).
 /// Otherwise, type inference cannot converge properly.
 /// For detailed properties of this type, see the unit test at the end of the file.

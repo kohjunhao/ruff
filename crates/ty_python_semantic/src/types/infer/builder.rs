@@ -8980,8 +8980,10 @@ impl<'db, 'ast> TypeInferenceBuilder<'db, 'ast> {
     ) -> CallArguments<'a, 'db> {
         let db = self.db();
         let env = self.program_environment();
-        let call_arguments =
-            CallArguments::from_arguments(arguments, |arg_or_keyword, splatted_value| {
+        let call_arguments = CallArguments::from_arguments(
+            self.program_file(),
+            arguments,
+            |arg_or_keyword, splatted_value| {
                 let ty = self.get_or_infer_expression(splatted_value, TypeContext::default());
                 if let ast::ArgOrKeyword::Arg(argument) = arg_or_keyword
                     && argument.is_starred_expr()
@@ -8992,7 +8994,8 @@ impl<'db, 'ast> TypeInferenceBuilder<'db, 'ast> {
                 }
 
                 ty
-            });
+            },
+        );
 
         for arg in &arguments.args {
             if let ast::Expr::Starred(ast::ExprStarred { value, .. }) = arg {
@@ -13222,6 +13225,12 @@ impl<'db, 'ast> AddBinding<'db, 'ast> {
             }
         }
 
+        // An unresolved declaration can still override this value after assignment validation.
+        // Retain that dependency: in `x: list[TypeOf[x]]; x = [1]`, using only `list[int]`
+        // here loses the recursive marker before the annotation can normalize its structure.
+        if declared_ty.is_recursive_divergent() {
+            bound_ty = UnionType::from_elements_cycle_recovery(db, env, [bound_ty, declared_ty]);
+        }
         builder.bindings.insert(self.binding, bound_ty);
 
         inferred_ty

@@ -717,3 +717,35 @@ value = 0
 while value:
     value = new_class("C", (value,))
 ```
+
+## Recursive annotations with multiple union arms
+
+A deferred `TypeOf` annotation can repeatedly wrap the entire previous union in each generic arm.
+Retaining its recursive input lets inference converge while preserving the annotation's structure.
+
+```toml
+[environment]
+python-version = "3.13"
+```
+
+```py
+from __future__ import annotations
+from ty_extensions._internal import TypeOf
+
+class Container[T]: ...
+
+value: list[TypeOf[value]] | Container[TypeOf[value]] | None
+value = [1]
+reveal_type(value)  # revealed: list[Divergent]
+```
+
+Recovery preserves the annotation's qualifiers, so a subsequent assignment to a `Final` variable is
+still rejected.
+
+```py
+from typing import Final
+
+final_value: Final[list[TypeOf[final_value]] | Container[TypeOf[final_value]] | None]
+final_value = [1]
+final_value = [2]  # error: [invalid-assignment] "Reassignment of `Final` symbol"
+```

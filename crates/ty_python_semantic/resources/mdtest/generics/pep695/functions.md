@@ -3637,6 +3637,193 @@ def probe(value: Levels[int, str, bytes]):
     reveal_type(grandchild_value(value))  # revealed: bytes
 ```
 
+## Unresolved arguments in recursive generic calls
+
+An argument that depends entirely on the call's own result provides no initial type arguments.
+Inference keeps these bindings provisional instead of repeatedly wrapping a default `Unknown` in
+more containers. The undefined reference is still reported.
+
+```py
+def grow[A, B](value: tuple[A, B]) -> tuple[list[A], tuple[A, B]]:
+    raise NotImplementedError
+
+def repeat(flag: bool):
+    while flag:
+        value = grow(value)  # error: [possibly-unresolved-reference]
+```
+
+## Unresolved callable arguments in recursive generic calls
+
+The unresolved binding can occur inside a callable's narrowing target or a generic TypedDict.
+
+```py
+from collections.abc import Callable
+from typing_extensions import TypeGuard, TypeIs, TypedDict
+
+class Payload[A](TypedDict):
+    value: A
+
+def grow_guard[A, B](
+    value: tuple[Callable[[], TypeGuard[A]], B],
+) -> tuple[Callable[[], TypeGuard[list[A]]], tuple[Callable[[], TypeGuard[A]], B]]:
+    raise NotImplementedError
+
+def grow_is[A, B](
+    value: tuple[Callable[[], TypeIs[A]], B],
+) -> tuple[Callable[[], TypeIs[list[A]]], tuple[Callable[[], TypeIs[A]], B]]:
+    raise NotImplementedError
+
+def grow_dict[A, B](
+    value: tuple[Callable[[], Payload[A]], B],
+) -> tuple[Callable[[], Payload[list[A]]], tuple[Callable[[], Payload[A]], B]]:
+    raise NotImplementedError
+
+def repeat_guard(flag: bool):
+    while flag:
+        value = grow_guard(value)  # error: [possibly-unresolved-reference]
+
+def repeat_is(flag: bool):
+    while flag:
+        value = grow_is(value)  # error: [possibly-unresolved-reference]
+
+def repeat_dict(flag: bool):
+    while flag:
+        value = grow_dict(value)  # error: [possibly-unresolved-reference]
+```
+
+## Recursive calls retain known return structure
+
+An unresolved element type does not erase the return type's outer container. A function returning a
+list still cannot accept that list as a tuple argument on the next iteration.
+
+```py
+def to_list[A](value: tuple[A]) -> list[A]:
+    return [value[0]]
+
+def repeat(flag: bool):
+    while flag:
+        # error: [invalid-argument-type]
+        # error: [possibly-unresolved-reference]
+        value = to_list(value)
+```
+
+Another argument can supply the type parameter independently, even when the recursive argument is
+unresolved.
+
+```py
+def to_list_with_default[A](value: tuple[A], default: A) -> list[A]:
+    return [default]
+
+def repeat_with_default(flag: bool):
+    while flag:
+        # error: [invalid-argument-type]
+        # error: [possibly-unresolved-reference]
+        value = to_list_with_default(value, 1)
+```
+
+## Separate calls preserve recursive argument structure
+
+Calling the same function after a loop adds another list layer. The second call does not share the
+loop call's pending type arguments.
+
+```py
+def grow[A](value: tuple[A]) -> tuple[list[A]]:
+    return ([value[0]],)
+
+def repeat(flag: bool):
+    while flag:
+        value = grow(value)  # error: [possibly-unresolved-reference]
+    # error: [possibly-unresolved-reference]
+    reveal_type(grow(value))  # revealed: tuple[list[list[Divergent]]]
+    # error: [invalid-assignment]
+    # error: [possibly-unresolved-reference]
+    wrong: tuple[list[int]] = grow(value)
+```
+
+## Recursive calls retain type parameter bounds
+
+The return type has a known list element even while its contents are unresolved. Passing that result
+back to a function whose element type is bounded by `int` violates the bound.
+
+```py
+def grow[A: int](value: tuple[A]) -> tuple[list[A]]:
+    return ([value[0]],)
+
+def repeat(flag: bool):
+    while flag:
+        # error: [invalid-argument-type]
+        # error: [possibly-unresolved-reference]
+        value = grow(value)
+```
+
+## Unresolved arguments through generic aliases
+
+Wrapping the tuple in a type alias preserves the same recursive dependency.
+
+```py
+type Box[A] = tuple[A]
+
+def grow[A](value: Box[A]) -> Box[list[A]]:
+    return ([value[0]],)
+
+def repeat(flag: bool):
+    while flag:
+        value = grow(value)  # error: [possibly-unresolved-reference]
+```
+
+## Recursive calls with type parameter defaults
+
+A declared default remains available when the recursive argument provides no binding. The default
+also determines the return type used to check the next iteration.
+
+```toml
+[environment]
+python-version = "3.13"
+```
+
+```py
+def first[A = int](value: tuple[A]) -> A:
+    return value[0]
+
+def repeat(flag: bool):
+    while flag:
+        # error: [invalid-argument-type] "Expected `tuple[int]`, found `int`"
+        # error: [possibly-unresolved-reference]
+        value = first(value)
+```
+
+## Finite mutually dependent generic calls
+
+Wrapping and unwrapping an element preserves its type. Initializers supply the element type even
+when the two calls depend on each other through separate loop variables.
+
+```py
+from typing import Literal
+
+def wrap[A](value: tuple[A]) -> tuple[list[A]]:
+    return ([value[0]],)
+
+def unwrap[A](value: tuple[list[A]]) -> tuple[A]:
+    return (value[0][0],)
+
+def repeat(flag: bool):
+    value = (1,)
+    other = ([1],)
+    while flag:
+        value = unwrap(other)
+        other = wrap(value)
+    reveal_type(value)  # revealed: tuple[int]
+    reveal_type(other)  # revealed: tuple[list[int]]
+    bad: tuple[Literal[1]] = value  # error: [invalid-assignment]
+
+def nested(flag: bool):
+    value = (1,)
+    while flag:
+        value = unwrap(unwrap(wrap(wrap(value))))
+    reveal_type(value)  # revealed: tuple[int]
+    bad: tuple[Literal[1]] = value  # error: [invalid-assignment]
+```
+
 ## Generic property setters implementing protocols
 
 These deliberately contrived setters could use `object` and `int` directly instead of method-scoped
