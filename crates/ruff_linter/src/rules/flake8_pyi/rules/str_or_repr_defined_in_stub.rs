@@ -3,7 +3,11 @@ use ruff_python_ast::Stmt;
 
 use ruff_macros::{ViolationMetadata, derive_message_formats};
 use ruff_python_ast::identifier::Identifier;
+use ruff_python_semantic::analyze::class::{
+    ClassMemberKind, any_member_declaration, iter_super_class,
+};
 use ruff_python_semantic::analyze::visibility::is_abstract;
+use ruff_python_semantic::{ScopeKind, SemanticModel};
 
 use crate::checkers::ast::Checker;
 use crate::codes::Category;
@@ -64,9 +68,9 @@ pub(crate) fn str_or_repr_defined_in_stub(checker: &Checker, stmt: &Stmt) {
         return;
     }
 
-    if !checker.semantic().current_scope().kind.is_class() {
+    let ScopeKind::Class(class_def) = checker.semantic().current_scope().kind else {
         return;
-    }
+    };
 
     // It is a violation only if the method signature matches that of `object.__str__`
     // or `object.__repr__` exactly and the method is not decorated as abstract.
@@ -84,6 +88,11 @@ pub(crate) fn str_or_repr_defined_in_stub(checker: &Checker, stmt: &Stmt) {
         return;
     }
 
+    // Implementing an abstract method is required, so the definition isn't redundant.
+    if overrides_abstract_method(class_def, name, checker.semantic()) {
+        return;
+    }
+
     let mut diagnostic = checker.report_diagnostic(
         StrOrReprDefinedInStub {
             name: name.to_string(),
@@ -96,4 +105,32 @@ pub(crate) fn str_or_repr_defined_in_stub(checker: &Checker, stmt: &Stmt) {
     diagnostic.set_fix(Fix::safe_edit(edit).isolate(Checker::isolation(
         checker.semantic().current_statement_parent_id(),
     )));
+}
+
+/// Returns `true` if the nearest superclass of `class_def` that declares `name` declares it as an
+/// abstract method.
+///
+/// Only superclasses defined earlier in the same file are resolved.
+fn overrides_abstract_method(
+    class_def: &ast::StmtClassDef,
+    name: &str,
+    semantic: &SemanticModel,
+) -> bool {
+    iter_super_class(class_def, semantic)
+        .skip(1)
+        .find_map(|super_class| {
+            let mut is_abstract_method = None;
+            any_member_declaration(super_class, |declaration| {
+                let ClassMemberKind::FunctionDef(function_def) = declaration.kind() else {
+                    return false;
+                };
+                if function_def.name.as_str() != name {
+                    return false;
+                }
+                is_abstract_method = Some(is_abstract(&function_def.decorator_list, semantic));
+                true
+            });
+            is_abstract_method
+        })
+        .unwrap_or(false)
 }
